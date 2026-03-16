@@ -1,0 +1,403 @@
+name: 'HAIEC Security Scan'
+description: 'AI security scanning for your codebase - detect prompt injection, data leakage, and AI-specific vulnerabilities'
+author: 'HAIEC'
+
+branding:
+  icon: 'shield'
+  color: 'green'
+
+inputs:
+  haiec-api-key:
+    description: 'HAIEC API key (haiec_live_* or haiec_test_*). Get yours at https://haiec.com/dashboard/api-keys'
+    required: true
+  fail-on-critical:
+    description: 'Fail build if critical severity findings are found'
+    required: false
+    default: 'true'
+  fail-on-high:
+    description: 'Fail build if high severity findings are found'
+    required: false
+    default: 'false'
+  upload-sarif:
+    description: 'Upload SARIF results to GitHub Code Scanning'
+    required: false
+    default: 'true'
+  policy-file:
+    description: 'Path to custom policy configuration file (.haiec/policy.json)'
+    required: false
+    default: ''
+  scan-paths:
+    description: 'Comma-separated paths to scan (default: entire repository)'
+    required: false
+    default: ''
+  exclude-paths:
+    description: 'Comma-separated paths to exclude from scan'
+    required: false
+    default: 'node_modules/**,vendor/**,dist/**,build/**'
+
+outputs:
+  scan-id:
+    description: 'Unique scan identifier'
+    value: ${{ steps.scan.outputs.scan-id }}
+  findings-count:
+    description: 'Total number of findings'
+    value: ${{ steps.scan.outputs.findings-count }}
+  critical-count:
+    description: 'Number of critical severity findings'
+    value: ${{ steps.scan.outputs.critical-count }}
+  high-count:
+    description: 'Number of high severity findings'
+    value: ${{ steps.scan.outputs.high-count }}
+  gate-passed:
+    description: 'Whether the policy gate passed (true/false)'
+    value: ${{ steps.scan.outputs.gate-passed }}
+  risk-score:
+    description: 'Overall risk score (0-100)'
+    value: ${{ steps.scan.outputs.risk-score }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Validate API Key Format
+      shell: bash
+      run: |
+        if [[ ! "${{ inputs.haiec-api-key }}" =~ ^haiec_(live|test)_ ]]; then
+          echo "::error::Invalid API key format. Must start with haiec_live_ or haiec_test_"
+          echo "Get your API key at: https://haiec.com/dashboard/api-keys"
+          exit 1
+        fi
+        echo "✅ API key format validated"
+    
+    - name: Install Dependencies
+      shell: bash
+      run: |
+        echo "📦 Installing jq for JSON processing..."
+        if ! command -v jq &> /dev/null; then
+          sudo apt-get update -qq
+          sudo apt-get install -y jq
+        fi
+        echo "✅ Dependencies installed"
+    
+    - name: Run HAIEC Security Scan
+      id: scan
+      shell: bash
+      env:
+        HAIEC_API_KEY: ${{ inputs.haiec-api-key }}
+        FAIL_ON_CRITICAL: ${{ inputs.fail-on-critical }}
+        FAIL_ON_HIGH: ${{ inputs.fail-on-high }}
+      run: |
+        echo "🔍 Starting HAIEC Security Scan..."
+        echo "Repository: ${{ github.repository }}"
+        echo "Commit: ${{ github.sha }}"
+        echo "Ref: ${{ github.ref }}"
+        
+        # Build request payload
+        PAYLOAD=$(cat <<EOF
+        {
+          "repository": {
+            "owner": "${{ github.repository_owner }}",
+            "repo": "${{ github.event.repository.name }}",
+            "sha": "${{ github.sha }}",
+            "ref": "${{ github.ref }}"
+          },
+          "policyPacks": ["core-integrity"]
+        }
+        EOF
+        )
+        
+        echo "📡 Calling HAIEC API..."
+        
+        # Call HAIEC API with proper authentication
+        HTTP_RESPONSE=$(curl -s -w "\nHTTP_STATUS:%{http_code}" \
+          -X POST \
+          -H "Authorization: Bearer ${HAIEC_API_KEY}" \
+          -H "Content-Type: application/json" \
+          -H "User-Agent: haiec-github-action/1.0" \
+          -d "$PAYLOAD" \
+          https://haiec.com/api/ci/scan)
+        
+        # Extract HTTP status code and body
+        HTTP_BODY=$(echo "$HTTP_RESPONSE" | sed -e 's/HTTP_STATUS\:.*//g')
+        HTTP_STATUS=$(echo "$HTTP_RESPONSE" | tr -d '\n' | sed -e 's/.*HTTP_STATUS://')
+        
+        # Check for HTTP errors
+        if [ "$HTTP_STATUS" != "200" ]; then
+          echo "::error::❌ API request failed with status $HTTP_STATUS"
+          echo "Response: $HTTP_BODY"
+          
+          if [ "$HTTP_STATUS" == "401" ]; then
+            echo ""
+            echo "::error::🔑 Authentication failed. Please check:"
+            echo "  1. HAIEC_API_KEY secret is set correctly in repository settings"
+            echo "  2. API key is active (check https://haiec.com/dashboard/api-keys)"
+            echo "  3. API key starts with haiec_live_ or haiec_test_"
+            echo "  4. API key has not expired"
+          elif [ "$HTTP_STATUS" == "429" ]; then
+            echo "::error::⏱️ Rate limit exceeded. Upgrade your plan at https://haiec.com/pricing"
+          elif [ "$HTTP_STATUS" == "503" ]; then
+            echo "::error::🔧 Scanner service unavailable. Please retry later or contact support."
+          fi
+          
+          exit 1
+        fi
+        
+        # Save raw response
+        echo "$HTTP_BODY" > haiec-results.json
+        
+        # Parse response
+        SCAN_ID=$(echo "$HTTP_BODY" | jq -r '.scanId // "unknown"')
+        STATUS=$(echo "$HTTP_BODY" | jq -r '.status // "unknown"')
+        FINDINGS_COUNT=$(echo "$HTTP_BODY" | jq -r '.metadata.totalFindings // 0')
+        CRITICAL_COUNT=$(echo "$HTTP_BODY" | jq -r '.metadata.criticalCount // 0')
+        HIGH_COUNT=$(echo "$HTTP_BODY" | jq -r '.metadata.highCount // 0')
+        MEDIUM_COUNT=$(echo "$HTTP_BODY" | jq -r '.metadata.mediumCount // 0')
+        LOW_COUNT=$(echo "$HTTP_BODY" | jq -r '.metadata.lowCount // 0')
+        RISK_SCORE=$(echo "$HTTP_BODY" | jq -r '.metadata.riskScore // 0')
+        GATE_PASSED=$(echo "$HTTP_BODY" | jq -r '.gateResult.pass // false')
+        SCAN_DURATION=$(echo "$HTTP_BODY" | jq -r '.metadata.scanDurationMs // 0')
+        
+        # Set outputs
+        echo "scan-id=$SCAN_ID" >> $GITHUB_OUTPUT
+        echo "findings-count=$FINDINGS_COUNT" >> $GITHUB_OUTPUT
+        echo "critical-count=$CRITICAL_COUNT" >> $GITHUB_OUTPUT
+        echo "high-count=$HIGH_COUNT" >> $GITHUB_OUTPUT
+        echo "gate-passed=$GATE_PASSED" >> $GITHUB_OUTPUT
+        echo "risk-score=$RISK_SCORE" >> $GITHUB_OUTPUT
+        
+        # Create output directory
+        mkdir -p haiec-results
+        
+        # Generate SARIF for GitHub Code Scanning
+        echo "📋 Generating SARIF report..."
+        echo "$HTTP_BODY" | jq '{
+          version: "2.1.0",
+          "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+          runs: [{
+            tool: {
+              driver: {
+                name: "HAIEC",
+                version: (.metadata.engineVersion // "2025.1.0"),
+                informationUri: "https://haiec.com",
+                rules: [.findings[] | {
+                  id: .ruleId,
+                  shortDescription: { text: .title },
+                  fullDescription: { text: .message },
+                  help: { text: .remediation },
+                  defaultConfiguration: {
+                    level: (if .severity == "CRITICAL" or .severity == "HIGH" then "error" elif .severity == "MEDIUM" then "warning" else "note" end)
+                  }
+                }] | unique_by(.id)
+              }
+            },
+            results: [.findings[] | {
+              ruleId: .ruleId,
+              level: (if .severity == "CRITICAL" or .severity == "HIGH" then "error" elif .severity == "MEDIUM" then "warning" else "note" end),
+              message: { text: .message },
+              locations: [{
+                physicalLocation: {
+                  artifactLocation: { uri: .evidence.sourceFile },
+                  region: {
+                    startLine: (.evidence.sourceLine // 1),
+                    endLine: (.evidence.endLine // .evidence.sourceLine // 1),
+                    snippet: { text: (.evidence.codeSnippet // "") }
+                  }
+                }
+              }],
+              fingerprints: {
+                haiecFingerprint: .fingerprint
+              }
+            }]
+          }]
+        }' > haiec-results/haiec-scan.sarif
+        
+        # Generate HTML report
+        echo "📄 Generating HTML report..."
+        cat > haiec-report.html <<'HTMLEOF'
+        <!DOCTYPE html>
+        <html lang="en">
+        <head>
+          <meta charset="UTF-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1.0">
+          <title>HAIEC Security Scan Report</title>
+          <style>
+            * { margin: 0; padding: 0; box-sizing: border-box; }
+            body { 
+              font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+              background: #0f172a;
+              color: #e2e8f0;
+              padding: 20px;
+            }
+            .container { max-width: 1200px; margin: 0 auto; }
+            .header { 
+              background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+              padding: 30px;
+              border-radius: 12px;
+              margin-bottom: 30px;
+            }
+            .header h1 { font-size: 32px; margin-bottom: 10px; }
+            .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; margin: 20px 0; }
+            .stat { background: rgba(255,255,255,0.1); padding: 20px; border-radius: 8px; }
+            .stat-label { font-size: 12px; opacity: 0.8; text-transform: uppercase; }
+            .stat-value { font-size: 28px; font-weight: bold; margin-top: 5px; }
+            .finding { 
+              background: #1e293b;
+              border-left: 4px solid;
+              padding: 20px;
+              margin: 15px 0;
+              border-radius: 8px;
+            }
+            .finding.critical { border-color: #dc2626; }
+            .finding.high { border-color: #ea580c; }
+            .finding.medium { border-color: #f59e0b; }
+            .finding.low { border-color: #84cc16; }
+            .finding-header { display: flex; justify-content: space-between; align-items: start; margin-bottom: 15px; }
+            .finding-title { font-size: 18px; font-weight: 600; }
+            .severity-badge {
+              padding: 4px 12px;
+              border-radius: 4px;
+              font-size: 12px;
+              font-weight: 600;
+              text-transform: uppercase;
+            }
+            .severity-critical { background: #dc2626; color: white; }
+            .severity-high { background: #ea580c; color: white; }
+            .severity-medium { background: #f59e0b; color: white; }
+            .severity-low { background: #84cc16; color: white; }
+            .code-snippet {
+              background: #0f172a;
+              padding: 15px;
+              border-radius: 6px;
+              overflow-x: auto;
+              font-family: 'Courier New', monospace;
+              font-size: 13px;
+              margin: 10px 0;
+            }
+            .file-location { color: #94a3b8; font-size: 14px; margin: 10px 0; }
+          </style>
+        </head>
+        <body>
+          <div class="container">
+            <div class="header">
+              <h1>🛡️ HAIEC Security Scan Report</h1>
+              <p>Scan ID: <strong>SCAN_ID_PLACEHOLDER</strong></p>
+              <p>Duration: <strong>DURATION_PLACEHOLDER</strong>ms</p>
+            </div>
+            
+            <div class="stats">
+              <div class="stat">
+                <div class="stat-label">Total Findings</div>
+                <div class="stat-value">TOTAL_PLACEHOLDER</div>
+              </div>
+              <div class="stat">
+                <div class="stat-label">Critical</div>
+                <div class="stat-value" style="color: #dc2626;">CRITICAL_PLACEHOLDER</div>
+              </div>
+              <div class="stat">
+                <div class="stat-label">High</div>
+                <div class="stat-value" style="color: #ea580c;">HIGH_PLACEHOLDER</div>
+              </div>
+              <div class="stat">
+                <div class="stat-label">Risk Score</div>
+                <div class="stat-value">RISK_PLACEHOLDER</div>
+              </div>
+            </div>
+            
+            <div id="findings"></div>
+          </div>
+          
+          <script>
+            const data = RESULTS_PLACEHOLDER;
+            const container = document.getElementById('findings');
+            
+            if (data.findings && data.findings.length > 0) {
+              data.findings.forEach(f => {
+                const div = document.createElement('div');
+                div.className = `finding ${f.severity.toLowerCase()}`;
+                div.innerHTML = `
+                  <div class="finding-header">
+                    <div class="finding-title">${f.title}</div>
+                    <span class="severity-badge severity-${f.severity.toLowerCase()}">${f.severity}</span>
+                  </div>
+                  <p>${f.message}</p>
+                  <div class="file-location">📁 ${f.evidence.sourceFile}:${f.evidence.sourceLine}</div>
+                  ${f.evidence.codeSnippet ? `<div class="code-snippet">${f.evidence.codeSnippet}</div>` : ''}
+                  ${f.remediation ? `<p style="margin-top: 10px;"><strong>Fix:</strong> ${f.remediation}</p>` : ''}
+                `;
+                container.appendChild(div);
+              });
+            } else {
+              container.innerHTML = '<div class="finding" style="border-color: #10b981;"><p>✅ No security findings detected!</p></div>';
+            }
+          </script>
+        </body>
+        </html>
+        HTMLEOF
+        
+        # Replace placeholders in HTML
+        sed -i "s/SCAN_ID_PLACEHOLDER/$SCAN_ID/g" haiec-report.html
+        sed -i "s/DURATION_PLACEHOLDER/$SCAN_DURATION/g" haiec-report.html
+        sed -i "s/TOTAL_PLACEHOLDER/$FINDINGS_COUNT/g" haiec-report.html
+        sed -i "s/CRITICAL_PLACEHOLDER/$CRITICAL_COUNT/g" haiec-report.html
+        sed -i "s/HIGH_PLACEHOLDER/$HIGH_COUNT/g" haiec-report.html
+        sed -i "s/RISK_PLACEHOLDER/$RISK_SCORE/g" haiec-report.html
+        sed -i "s|RESULTS_PLACEHOLDER|$(echo "$HTTP_BODY" | jq -c .)|g" haiec-report.html
+        
+        # Print summary
+        echo ""
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "📊 HAIEC Security Scan Results"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "Scan ID:     $SCAN_ID"
+        echo "Status:      $STATUS"
+        echo "Gate:        $([ "$GATE_PASSED" == "true" ] && echo "✅ PASSED" || echo "❌ FAILED")"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "Total:       $FINDINGS_COUNT findings"
+        echo "Critical:    $CRITICAL_COUNT"
+        echo "High:        $HIGH_COUNT"
+        echo "Medium:      $MEDIUM_COUNT"
+        echo "Low:         $LOW_COUNT"
+        echo "Risk Score:  $RISK_SCORE/100"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        
+        # Create GitHub step summary
+        cat >> $GITHUB_STEP_SUMMARY <<SUMMARY
+        ## 🛡️ HAIEC Security Scan Results
+        
+        **Scan ID:** \`$SCAN_ID\`  
+        **Status:** $STATUS  
+        **Gate:** $([ "$GATE_PASSED" == "true" ] && echo "✅ PASSED" || echo "❌ FAILED")
+        
+        ### 📊 Findings Summary
+        
+        | Severity | Count |
+        |----------|-------|
+        | 🔴 Critical | $CRITICAL_COUNT |
+        | 🟠 High | $HIGH_COUNT |
+        | 🟡 Medium | $MEDIUM_COUNT |
+        | 🟢 Low | $LOW_COUNT |
+        | **Total** | **$FINDINGS_COUNT** |
+        
+        **Risk Score:** $RISK_SCORE/100  
+        **Scan Duration:** ${SCAN_DURATION}ms
+        
+        [View detailed report](https://haiec.com/dashboard/scans/$SCAN_ID)
+        SUMMARY
+        
+        # Check gate result and fail if needed
+        if [ "$GATE_PASSED" != "true" ]; then
+          echo ""
+          echo "::error::❌ Policy gate failed - blocking deployment"
+          
+          if [ "$CRITICAL_COUNT" -gt 0 ]; then
+            echo "::error::Found $CRITICAL_COUNT critical severity findings"
+          fi
+          
+          if [ "$FAIL_ON_HIGH" == "true" ] && [ "$HIGH_COUNT" -gt 0 ]; then
+            echo "::error::Found $HIGH_COUNT high severity findings (fail-on-high enabled)"
+          fi
+          
+          exit 1
+        fi
+        
+        echo ""
+        echo "✅ Security scan completed successfully"

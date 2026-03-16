@@ -172,116 +172,169 @@ runs:
           exit 1
         fi
         
-        # Validate API response structure
-        if ! echo "$HTTP_BODY" | jq -e '.findings and (.findings | type=="array")' > /dev/null 2>&1; then
-          echo "::error::Invalid HAIEC response structure - missing .findings field"
-          
-          # Create output directory and artifacts
-          mkdir -p haiec-results
-          
-          # Save invalid response for debugging
-          echo "$HTTP_BODY" > haiec-results/invalid-response.json
-          
-          # Log response details for debugging
-          echo "::warning::API Response Details:"
-          echo "$HTTP_BODY" | jq -r 'if .error then "Error: \(.error)" else "Unknown response format" end' || echo "Failed to parse response"
-          echo "$HTTP_BODY" | jq -r 'if .scanId then "Scan ID: \(.scanId)" else "" end' || true
-          echo "$HTTP_BODY" | jq -r 'if .status then "Status: \(.status)" else "" end' || true
-          
-          # Generate valid empty SARIF
-          jq -n '{
-            version: "2.1.0",
-            "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
-            runs: [{
-              tool: {
-                driver: {
-                  name: "HAIEC",
-                  version: "response-error",
-                  informationUri: "https://haiec.com"
-                }
-              },
-              results: []
-            }]
-          }' > haiec-results/haiec-scan.sarif
-          
-          echo "{\"error\":\"Invalid response structure\"}" > haiec-results.json
-          
-          echo "::error::Invalid API response. Empty SARIF generated for upload."
-          exit 1
+        # Determine response mode
+        MODE="unknown"
+        
+        if echo "$HTTP_BODY" | jq -e '.findings' >/dev/null 2>&1; then
+          MODE="success"
+        elif echo "$HTTP_BODY" | jq -e '.error' >/dev/null 2>&1; then
+          MODE="scan_error"
+        else
+          MODE="invalid"
         fi
         
-        # Save raw response
-        echo "$HTTP_BODY" > haiec-results.json
-        
-        # Parse response
-        SCAN_ID=$(echo "$HTTP_BODY" | jq -r '.scanId // "unknown"')
-        STATUS=$(echo "$HTTP_BODY" | jq -r '.status // "unknown"')
-        FINDINGS_COUNT=$(echo "$HTTP_BODY" | jq -r '.metadata.totalFindings // 0')
-        CRITICAL_COUNT=$(echo "$HTTP_BODY" | jq -r '.metadata.criticalCount // 0')
-        HIGH_COUNT=$(echo "$HTTP_BODY" | jq -r '.metadata.highCount // 0')
-        MEDIUM_COUNT=$(echo "$HTTP_BODY" | jq -r '.metadata.mediumCount // 0')
-        LOW_COUNT=$(echo "$HTTP_BODY" | jq -r '.metadata.lowCount // 0')
-        RISK_SCORE=$(echo "$HTTP_BODY" | jq -r '.metadata.riskScore // 0')
-        GATE_PASSED=$(echo "$HTTP_BODY" | jq -r '.gateResult.pass // false')
-        SCAN_DURATION=$(echo "$HTTP_BODY" | jq -r '.metadata.scanDurationMs // 0')
-        
-        # Set outputs
-        echo "scan-id=$SCAN_ID" >> $GITHUB_OUTPUT
-        echo "findings-count=$FINDINGS_COUNT" >> $GITHUB_OUTPUT
-        echo "critical-count=$CRITICAL_COUNT" >> $GITHUB_OUTPUT
-        echo "high-count=$HIGH_COUNT" >> $GITHUB_OUTPUT
-        echo "gate-passed=$GATE_PASSED" >> $GITHUB_OUTPUT
-        echo "risk-score=$RISK_SCORE" >> $GITHUB_OUTPUT
+        echo "Response mode: $MODE"
         
         # Create output directory
         mkdir -p haiec-results
         
-        # Generate SARIF for GitHub Code Scanning
-        echo "📋 Generating SARIF report..."
-        echo "$HTTP_BODY" | jq '{
-          version: "2.1.0",
-          "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
-          runs: [{
-            tool: {
-              driver: {
-                name: "HAIEC",
-                version: (.metadata.engineVersion // "2025.1.0"),
-                informationUri: "https://haiec.com",
-                rules: [.findings[] | {
-                  id: .ruleId,
-                  shortDescription: { text: .title },
-                  fullDescription: { text: .message },
-                  help: { text: .remediation },
-                  defaultConfiguration: {
-                    level: (if .severity == "CRITICAL" or .severity == "HIGH" then "error" elif .severity == "MEDIUM" then "warning" else "note" end)
-                  }
-                }] | unique_by(.id)
-              }
-            },
-            results: [.findings[] | {
-              ruleId: .ruleId,
-              level: (if .severity == "CRITICAL" or .severity == "HIGH" then "error" elif .severity == "MEDIUM" then "warning" else "note" end),
-              message: { text: .message },
-              locations: [{
-                physicalLocation: {
-                  artifactLocation: { uri: .evidence.sourceFile },
-                  region: {
-                    startLine: (.evidence.sourceLine // 1),
-                    endLine: (.evidence.endLine // .evidence.sourceLine // 1),
-                    snippet: { text: (.evidence.codeSnippet // "") }
-                  }
-                }
-              }],
-              fingerprints: {
-                haiecFingerprint: .fingerprint
-              }
-            }]
-          }]
-        }' > haiec-results/haiec-scan.sarif
+        # Save raw response
+        echo "$HTTP_BODY" > haiec-results.json
         
-        # Validate generated SARIF file
-        if ! jq empty haiec-results/haiec-scan.sarif > /dev/null 2>&1; then
-          echo "::warning::Generated SARIF file is invalid, creating fallback"
+        # Handle response based on MODE
+        if [ "$MODE" = "success" ]; then
+          # Parse response
+          FINDINGS_COUNT=$(echo "$HTTP_BODY" | jq -r '.metadata.totalFindings // 0')
+          CRITICAL_COUNT=$(echo "$HTTP_BODY" | jq -r '.metadata.criticalCount // 0')
+          HIGH_COUNT=$(echo "$HTTP_BODY" | jq -r '.metadata.highCount // 0')
+          MEDIUM_COUNT=$(echo "$HTTP_BODY" | jq -r '.metadata.mediumCount // 0')
+          LOW_COUNT=$(echo "$HTTP_BODY" | jq -r '.metadata.lowCount // 0')
+          RISK_SCORE=$(echo "$HTTP_BODY" | jq -r '.metadata.riskScore // 0')
+          GATE_PASSED=$(echo "$HTTP_BODY" | jq -r '.gateResult.pass // false')
+          SCAN_DURATION=$(echo "$HTTP_BODY" | jq -r '.metadata.scanDurationMs // 0')
+          
+          # Set outputs
+          echo "scan-id=$SCAN_ID" >> $GITHUB_OUTPUT
+          echo "findings-count=$FINDINGS_COUNT" >> $GITHUB_OUTPUT
+          echo "critical-count=$CRITICAL_COUNT" >> $GITHUB_OUTPUT
+          echo "high-count=$HIGH_COUNT" >> $GITHUB_OUTPUT
+          echo "gate-passed=$GATE_PASSED" >> $GITHUB_OUTPUT
+          echo "risk-score=$RISK_SCORE" >> $GITHUB_OUTPUT
+          
+          # Generate SARIF for GitHub Code Scanning
+          echo "📋 Generating SARIF report..."
+          echo "$HTTP_BODY" | jq '{
+            version: "2.1.0",
+            "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+            runs: [{
+              tool: {
+                driver: {
+                  name: "HAIEC",
+                  version: (.metadata.engineVersion // "2025.1.0"),
+                  informationUri: "https://haiec.com",
+                  rules: [.findings[] | {
+                    id: .ruleId,
+                    shortDescription: { text: .title },
+                    fullDescription: { text: .message },
+                    help: { text: .remediation },
+                    defaultConfiguration: {
+                      level: (if .severity == "CRITICAL" or .severity == "HIGH" then "error" elif .severity == "MEDIUM" then "warning" else "note" end)
+                    }
+                  }] | unique_by(.id)
+                }
+              },
+              results: [.findings[] | {
+                ruleId: .ruleId,
+                level: (if .severity == "CRITICAL" or .severity == "HIGH" then "error" elif .severity == "MEDIUM" then "warning" else "note" end),
+                message: { text: .message },
+                locations: [{
+                  physicalLocation: {
+                    artifactLocation: { uri: .evidence.sourceFile },
+                    region: {
+                      startLine: (.evidence.sourceLine // 1),
+                      endLine: (.evidence.endLine // .evidence.sourceLine // 1),
+                      snippet: { text: (.evidence.codeSnippet // "") }
+                    }
+                  }
+                }],
+                fingerprints: {
+                  haiecFingerprint: .fingerprint
+                }
+              }]
+            }]
+          }' > haiec-results/haiec-scan.sarif
+          
+          # Validate generated SARIF file
+          if ! jq empty haiec-results/haiec-scan.sarif > /dev/null 2>&1; then
+            echo "::warning::Generated SARIF file is invalid, creating fallback"
+            jq -n '{
+              version: "2.1.0",
+              "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+              runs: [{
+                tool: {
+                  driver: {
+                    name: "HAIEC",
+                    version: "fallback",
+                    informationUri: "https://haiec.com"
+                  }
+                },
+                results: []
+              }]
+            }' > haiec-results/haiec-scan.sarif
+          fi
+          
+        elif [ "$MODE" = "scan_error" ]; then
+          # Scan failed - generate SARIF with error result
+          ERROR_MSG=$(echo "$HTTP_BODY" | jq -r '.error // "HAIEC scan failed"')
+          EXIT_CODE=$(echo "$HTTP_BODY" | jq -r '.gateResult.exitCode // 1')
+          
+          echo "::error::HAIEC scan failed"
+          echo "Scan ID: $SCAN_ID"
+          echo "Error: $ERROR_MSG"
+          
+          # Set outputs
+          echo "scan-id=$SCAN_ID" >> $GITHUB_OUTPUT
+          echo "findings-count=0" >> $GITHUB_OUTPUT
+          echo "critical-count=0" >> $GITHUB_OUTPUT
+          echo "high-count=0" >> $GITHUB_OUTPUT
+          echo "gate-passed=false" >> $GITHUB_OUTPUT
+          echo "risk-score=0" >> $GITHUB_OUTPUT
+          
+          # Generate SARIF with scan failure as a result
+          jq -n --arg error "$ERROR_MSG" --arg scanId "$SCAN_ID" '{
+            version: "2.1.0",
+            "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+            runs: [{
+              tool: {
+                driver: {
+                  name: "HAIEC",
+                  version: "scan-error",
+                  informationUri: "https://haiec.com",
+                  rules: [{
+                    id: "haiec.scan.failure",
+                    shortDescription: { text: "HAIEC Scan Failure" },
+                    fullDescription: { text: "The HAIEC security scan failed to complete" },
+                    help: { text: "Check the scan logs for details" },
+                    defaultConfiguration: { level: "error" }
+                  }]
+                }
+              },
+              results: [{
+                ruleId: "haiec.scan.failure",
+                level: "error",
+                message: { text: $error },
+                properties: {
+                  scanId: $scanId
+                }
+              }]
+            }]
+          }' > haiec-results/haiec-scan.sarif
+          
+          exit $EXIT_CODE
+          
+        else
+          # Invalid response format
+          echo "::error::Invalid API response format"
+          
+          # Set outputs
+          echo "scan-id=$SCAN_ID" >> $GITHUB_OUTPUT
+          echo "findings-count=0" >> $GITHUB_OUTPUT
+          echo "critical-count=0" >> $GITHUB_OUTPUT
+          echo "high-count=0" >> $GITHUB_OUTPUT
+          echo "gate-passed=false" >> $GITHUB_OUTPUT
+          echo "risk-score=0" >> $GITHUB_OUTPUT
+          
+          # Generate fallback SARIF
           jq -n '{
             version: "2.1.0",
             "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
@@ -289,13 +342,15 @@ runs:
               tool: {
                 driver: {
                   name: "HAIEC",
-                  version: "fallback",
+                  version: "invalid-response",
                   informationUri: "https://haiec.com"
                 }
               },
               results: []
             }]
           }' > haiec-results/haiec-scan.sarif
+          
+          exit 1
         fi
         
         # Generate HTML report

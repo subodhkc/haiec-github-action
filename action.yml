@@ -172,6 +172,11 @@ runs:
           exit 1
         fi
         
+        # Parse common fields from response
+        SCAN_ID=$(echo "$HTTP_BODY" | jq -r '.scanId // "unknown"')
+        ERROR_MSG=$(echo "$HTTP_BODY" | jq -r '.error // "unknown error"')
+        EXIT_CODE=$(echo "$HTTP_BODY" | jq -r '.gateResult.exitCode // 1')
+        
         # Determine response mode
         MODE="unknown"
         
@@ -275,9 +280,6 @@ runs:
           
         elif [ "$MODE" = "scan_error" ]; then
           # Scan failed - generate SARIF with error result
-          ERROR_MSG=$(echo "$HTTP_BODY" | jq -r '.error // "HAIEC scan failed"')
-          EXIT_CODE=$(echo "$HTTP_BODY" | jq -r '.gateResult.exitCode // 1')
-          
           echo "::error::HAIEC scan failed"
           echo "Scan ID: $SCAN_ID"
           echo "Error: $ERROR_MSG"

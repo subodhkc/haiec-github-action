@@ -114,7 +114,7 @@ runs:
           -H "Content-Type: application/json" \
           -H "User-Agent: haiec-github-action/1.0" \
           -d "$PAYLOAD" \
-          https://haiec.com/api/ci/scan)
+          https://www.haiec.com/api/ci/scan)
         
         # Extract HTTP status code and body
         HTTP_BODY=$(echo "$HTTP_RESPONSE" | sed -e 's/HTTP_STATUS\:.*//g')

@@ -313,13 +313,31 @@ runs:
           TOTAL=$(jq -r '.findings | length // 0' "${{ inputs.output-dir }}/result.json")
           CRITICAL=$(jq -r '[.findings[] | select(.severity == "CRITICAL")] | length // 0' "${{ inputs.output-dir }}/result.json")
           HIGH=$(jq -r '[.findings[] | select(.severity == "HIGH")] | length // 0' "${{ inputs.output-dir }}/result.json")
+          MEDIUM=$(jq -r '[.findings[] | select(.severity == "MEDIUM")] | length // 0' "${{ inputs.output-dir }}/result.json")
+          LOW=$(jq -r '[.findings[] | select(.severity == "LOW")] | length // 0' "${{ inputs.output-dir }}/result.json")
           HASH=$(jq -r '.metadata.contentHash // ""' "${{ inputs.output-dir }}/result.json" 2>/dev/null || echo "")
+          
+          # Extract SARIF from API response if present
+          if jq -e '.sarif' "${{ inputs.output-dir }}/result.json" > /dev/null 2>&1; then
+            jq '.sarif' "${{ inputs.output-dir }}/result.json" > "${{ inputs.output-dir }}/haiec-scan.sarif"
+            echo "✓ SARIF report extracted"
+          fi
+          
+          # Extract gate result
+          GATE_PASS=$(jq -r '.gateResult.pass // true' "${{ inputs.output-dir }}/result.json")
+          GATE_EXIT=$(jq -r '.gateResult.exitCode // 0' "${{ inputs.output-dir }}/result.json")
+          GATE_SUMMARY=$(jq -r '.gateResult.summary // ""' "${{ inputs.output-dir }}/result.json")
         else
           STATUS="ERROR"
           TOTAL=0
           CRITICAL=0
           HIGH=0
+          MEDIUM=0
+          LOW=0
           HASH=""
+          GATE_PASS="false"
+          GATE_EXIT=1
+          GATE_SUMMARY="Scan failed to complete"
         fi
         
         # Set outputs
@@ -328,12 +346,51 @@ runs:
         echo "findings_total=$TOTAL" >> $GITHUB_OUTPUT
         echo "findings_critical=$CRITICAL" >> $GITHUB_OUTPUT
         echo "findings_high=$HIGH" >> $GITHUB_OUTPUT
+        echo "findings_medium=$MEDIUM" >> $GITHUB_OUTPUT
+        echo "findings_low=$LOW" >> $GITHUB_OUTPUT
         echo "sarif_file=${{ inputs.output-dir }}/haiec-scan.sarif" >> $GITHUB_OUTPUT
         echo "bundle_file=${{ inputs.output-dir }}/evidence-bundle.json" >> $GITHUB_OUTPUT
         echo "content_hash=$HASH" >> $GITHUB_OUTPUT
+        echo "gate_pass=$GATE_PASS" >> $GITHUB_OUTPUT
         
-        # Log summary
-        echo "::notice::HAIEC Scan: $STATUS | Total: $TOTAL | Critical: $CRITICAL | High: $HIGH"
+        # Generate detailed summary
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "## 🛡️ HAIEC Security Scan Results" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**Status:** $STATUS" >> $GITHUB_STEP_SUMMARY
+        echo "**Policy Gate:** $([ "$GATE_PASS" = "true" ] && echo "✅ PASSED" || echo "❌ FAILED")" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### 📊 Findings Summary" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "| Severity | Count |" >> $GITHUB_STEP_SUMMARY
+        echo "| --- | --- |" >> $GITHUB_STEP_SUMMARY
+        echo "| 🔴 Critical | $CRITICAL |" >> $GITHUB_STEP_SUMMARY
+        echo "| 🟠 High | $HIGH |" >> $GITHUB_STEP_SUMMARY
+        echo "| 🟡 Medium | $MEDIUM |" >> $GITHUB_STEP_SUMMARY
+        echo "| 🟢 Low | $LOW |" >> $GITHUB_STEP_SUMMARY
+        echo "| **Total** | **$TOTAL** |" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        
+        if [ -n "$GATE_SUMMARY" ] && [ "$GATE_SUMMARY" != "null" ]; then
+          echo "### 📋 Policy Gate Result" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "$GATE_SUMMARY" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+        fi
+        
+        echo "### 📦 Artifacts" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "- 📄 Full scan results: \`result.json\`" >> $GITHUB_STEP_SUMMARY
+        if [ -f "${{ inputs.output-dir }}/haiec-scan.sarif" ]; then
+          echo "- 🔍 SARIF report: \`haiec-scan.sarif\`" >> $GITHUB_STEP_SUMMARY
+        fi
+        echo "" >> $GITHUB_STEP_SUMMARY
+        
+        # Log summary to console
+        echo "::notice::HAIEC Scan Complete: $TOTAL findings ($CRITICAL critical, $HIGH high, $MEDIUM medium, $LOW low)"
+        if [ "$GATE_PASS" != "true" ]; then
+          echo "::error::Policy gate FAILED: $GATE_SUMMARY"
+        fi
 
     # ============================================
     # SARIF UPLOAD

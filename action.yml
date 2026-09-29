@@ -1,457 +1,122 @@
-name: 'HAIEC AI Security Scan'
-description: 'Deterministic AI security scanning with AST analysis, policy gates, and SARIF export. No NPM required.'
-author: 'HAIEC <security@haiec.com>'
+name: HAIEC Assurance Scan
+
+description: Run the local HAIEC scanner in the GitHub runner, submit qualified evidence, and start the canonical Assurance Run.
+author: HAIEC
 
 branding:
-  icon: 'shield'
-  color: 'green'
+  icon: shield
+  color: green
 
 inputs:
-  # ============================================
-  # REQUIRED INPUTS
-  # ============================================
-  
   haiec-api-key:
-    description: 'HAIEC API key for authenticated scanning (from Dashboard > API Keys)'
+    description: HAIEC API key with scan:submit and scan:create
     required: true
-  
-  github-token:
-    description: 'GitHub token for repository access and SARIF upload'
+  ai-system-id:
+    description: Organization-bound HAIEC AI System ID
+    required: true
+  wait:
+    description: Wait for evaluation completion
     required: false
-    default: '${{ github.token }}'
-
-  # ============================================
-  # POLICY CONFIGURATION
-  # ============================================
-  
-  policy-file:
-    description: 'Path to custom policy JSON file'
-    required: false
-    default: ''
-  
+    default: 'true'
   fail-on-critical:
-    description: 'Fail the action if critical findings are detected'
+    description: Fail the job when critical findings are returned by the local policy result
     required: false
-    default: 'true'
-  
+    default: 'false'
   fail-on-high:
-    description: 'Fail the action if high findings are detected'
+    description: Fail the job when high findings are returned by the local policy result
     required: false
     default: 'false'
-  
   fail-on-findings:
-    description: 'Fail the action if any findings are detected'
+    description: Fail the job when any local findings are returned
     required: false
     default: 'false'
-
-  # ============================================
-  # SIDECAR CONFIGURATION
-  # ============================================
-  
-  python-sidecar:
-    description: 'Enable Python AST sidecar'
-    required: false
-    default: 'true'
-  
-  go-sidecar:
-    description: 'Enable Go AST sidecar'
-    required: false
-    default: 'true'
-  
-  js-sidecar:
-    description: 'Enable JavaScript/TypeScript AST sidecar'
-    required: false
-    default: 'true'
-
-  # ============================================
-  # OUTPUT CONFIGURATION
-  # ============================================
-  
-  upload-sarif:
-    description: 'Upload SARIF to GitHub Code Scanning'
-    required: false
-    default: 'true'
-  
   output-dir:
-    description: 'Directory for output artifacts'
+    description: Local scanner artifact directory
     required: false
-    default: 'haiec-results'
-
-  # ============================================
-  # INCREMENTAL SCANNING
-  # ============================================
-  
-  incremental:
-    description: 'Enable incremental scanning (PR mode)'
+    default: haiec-results
+  upload-sarif:
+    description: Upload local SARIF to GitHub Code Scanning
     required: false
-    default: 'auto'
-  
-  base-ref:
-    description: 'Base ref for incremental scan (auto-detected for PRs)'
-    required: false
-    default: ''
-
-  # ============================================
-  # SCAN SCOPE
-  # ============================================
-  
-  scan-paths:
-    description: 'Comma-separated list of paths to scan (e.g., src/,lib/)'
-    required: false
-    default: ''
-  
-  exclude-paths:
-    description: 'Comma-separated list of paths to exclude (e.g., test/,node_modules/)'
-    required: false
-    default: ''
-
-  # ============================================
-  # ADVANCED OPTIONS
-  # ============================================
-  
-  timeout-minutes:
-    description: 'Timeout for scan in minutes'
-    required: false
-    default: '10'
-  
-  working-directory:
-    description: 'Working directory for scan'
-    required: false
-    default: '.'
+    default: 'true'
 
 outputs:
-  status:
-    description: 'Policy evaluation status (PASS, WARN, FAIL)'
-    value: ${{ steps.scan.outputs.status }}
-  
-  exit-code:
-    description: 'Exit code (0 = pass, 1 = fail)'
-    value: ${{ steps.scan.outputs.exit_code }}
-  
+  scan-id:
+    description: Qualified scan ID
+    value: ${{ steps.scan.outputs.scan_id }}
+  run-id:
+    description: Assurance Run ID
+    value: ${{ steps.scan.outputs.run_id }}
+  evaluation-id:
+    description: Assurance Evaluation ID when available
+    value: ${{ steps.scan.outputs.evaluation_id }}
+  disposition:
+    description: Canonical disposition when available
+    value: ${{ steps.scan.outputs.disposition }}
+  report-url:
+    description: Canonical report URL when available
+    value: ${{ steps.scan.outputs.report_url }}
+  passport-url:
+    description: Canonical Passport URL when available
+    value: ${{ steps.scan.outputs.passport_url }}
   findings-total:
-    description: 'Total number of findings'
+    description: Local scanner finding total
     value: ${{ steps.scan.outputs.findings_total }}
-  
   findings-critical:
-    description: 'Number of critical findings'
+    description: Local scanner critical finding total
     value: ${{ steps.scan.outputs.findings_critical }}
-  
   findings-high:
-    description: 'Number of high findings'
+    description: Local scanner high finding total
     value: ${{ steps.scan.outputs.findings_high }}
-  
-  sarif-file:
-    description: 'Path to generated SARIF file'
-    value: ${{ steps.scan.outputs.sarif_file }}
-  
-  bundle-file:
-    description: 'Path to generated evidence bundle'
-    value: ${{ steps.scan.outputs.bundle_file }}
-  
-  content-hash:
-    description: 'Deterministic content hash of scan results'
-    value: ${{ steps.scan.outputs.content_hash }}
 
 runs:
-  using: 'composite'
+  using: composite
   steps:
-    # ============================================
-    # VALIDATION
-    # ============================================
-    
-    - name: Validate inputs
-      shell: bash
-      run: |
-        # Validate timeout
-        if ! [[ "${{ inputs.timeout-minutes }}" =~ ^[0-9]+$ ]]; then
-          echo "::error::Invalid timeout-minutes: must be a positive integer"
-          exit 1
-        fi
-        
-        # Validate policy file exists if specified
-        if [ -n "${{ inputs.policy-file }}" ] && [ ! -f "${{ inputs.policy-file }}" ]; then
-          echo "::error::Policy file not found: ${{ inputs.policy-file }}"
-          exit 1
-        fi
-        
-        echo "✓ Input validation passed"
-
-    # ============================================
-    # SETUP
-    # ============================================
-    
-    - name: Setup Node.js
+    - name: Setup Node
       uses: actions/setup-node@v4
       with:
         node-version: '20'
 
-    - name: Setup Python (if enabled)
-      if: inputs.python-sidecar == 'true'
-      uses: actions/setup-python@v5
-      with:
-        python-version: '3.11'
-
-    - name: Setup Go (if enabled)
-      if: inputs.go-sidecar == 'true'
-      uses: actions/setup-go@v5
-      with:
-        go-version: '1.21'
-
-    - name: Setup HAIEC Scanner
-      shell: bash
-      run: |
-        # Create scanner directory
-        mkdir -p /tmp/haiec-scanner
-        
-        # API-based scanning (primary mode)
-        SCANNER_VERSION="3.22.0"
-        echo "HAIEC_SCANNER_MODE=api" >> $GITHUB_ENV
-        echo "HAIEC_SCANNER_VERSION=$SCANNER_VERSION" >> $GITHUB_ENV
-        echo "✓ HAIEC Scanner v${SCANNER_VERSION} (API mode)"
-
-    # ============================================
-    # SCAN EXECUTION
-    # ============================================
-    
-    - name: Determine base commit
-      id: base
-      shell: bash
-      run: |
-        BASE_REF="${{ inputs.base-ref }}"
-        
-        if [ -z "$BASE_REF" ] && [ "${{ inputs.incremental }}" != "false" ]; then
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            BASE_REF="${{ github.event.pull_request.base.sha }}"
-          elif [ "${{ inputs.incremental }}" = "auto" ] && [ -n "${{ github.event.before }}" ]; then
-            BASE_REF="${{ github.event.before }}"
-          fi
-        fi
-        
-        echo "base_ref=$BASE_REF" >> $GITHUB_OUTPUT
-
-    - name: Run HAIEC Scan
+    - name: Run local HAIEC scan and Assurance
       id: scan
       shell: bash
       env:
-        CI: 'true'
-        HAIEC_PY_AST: ${{ inputs.python-sidecar == 'true' && '1' || '0' }}
-        HAIEC_GO_AST: ${{ inputs.go-sidecar == 'true' && '1' || '0' }}
-        HAIEC_JS_AST: ${{ inputs.js-sidecar == 'true' && '1' || '0' }}
-      working-directory: ${{ inputs.working-directory }}
+        HAIEC_API_KEY: ${{ inputs.haiec-api-key }}
+        HAIEC_AI_SYSTEM_ID: ${{ inputs.ai-system-id }}
       run: |
+        set -euo pipefail
         mkdir -p "${{ inputs.output-dir }}"
-        
-        # Build command arguments
-        ARGS="--output ${{ inputs.output-dir }} --json"
-        
-        if [ -n "${{ steps.base.outputs.base_ref }}" ]; then
-          ARGS="$ARGS --base ${{ steps.base.outputs.base_ref }}"
-        fi
-        
-        if [ -n "${{ inputs.policy-file }}" ]; then
-          ARGS="$ARGS --policy ${{ inputs.policy-file }}"
-        fi
-        
-        # API-based scanning via HAIEC CI endpoint
-        HAIEC_API_URL="${HAIEC_API_URL:-https://www.haiec.com/api/ci/scan}"
-        
-        # Prepare scan request
-        REPO_OWNER=$(echo "${{ github.repository }}" | cut -d/ -f1)
-        REPO_NAME=$(echo "${{ github.repository }}" | cut -d/ -f2)
-        
-        # Build scan paths array
-        SCAN_PATHS_JSON="[]"
-        if [ -n "${{ inputs.scan-paths }}" ]; then
-          SCAN_PATHS_JSON=$(echo "${{ inputs.scan-paths }}" | jq -R 'split(",") | map(gsub("^\\s+|\\s+$";""))')
-        fi
-        
-        # Build exclude paths array
-        EXCLUDE_PATHS_JSON="[]"
-        if [ -n "${{ inputs.exclude-paths }}" ]; then
-          EXCLUDE_PATHS_JSON=$(echo "${{ inputs.exclude-paths }}" | jq -R 'split(",") | map(gsub("^\\s+|\\s+$";""))')
-        fi
-        
-        SCAN_REQUEST=$(cat <<EOF
-        {
-          "repository": {
-            "owner": "$REPO_OWNER",
-            "repo": "$REPO_NAME",
-            "sha": "${{ github.sha }}",
-            "ref": "${{ github.ref }}",
-            "prNumber": ${{ github.event.pull_request.number || 'null' }}
-          },
-          "policyPacks": ["core-integrity"],
-          "baseRef": "${{ steps.base.outputs.base_ref }}",
-          "scanPaths": $SCAN_PATHS_JSON,
-          "excludePaths": $EXCLUDE_PATHS_JSON,
-          "githubToken": "${{ inputs.github-token }}"
-        }
-        EOF
-        )
-        
-        set +e
-        curl -fsSL -X POST "$HAIEC_API_URL" \
-          -H "Content-Type: application/json" \
-          -H "Authorization: Bearer ${{ inputs.haiec-api-key }}" \
-          -H "X-GitHub-Token: ${{ inputs.github-token }}" \
-          --max-time 600 \
-          -d "$SCAN_REQUEST" \
-          -o "${{ inputs.output-dir }}/result.json" \
-          2>"${{ inputs.output-dir }}/stderr.log"
-        SCAN_EXIT=$?
-        set -e
-        
-        # Log any errors
-        if [ -s "${{ inputs.output-dir }}/stderr.log" ]; then
-          echo "::warning::Scanner stderr output:"
-          cat "${{ inputs.output-dir }}/stderr.log"
-        fi
-        
-        # Parse results
-        if [ -f "${{ inputs.output-dir }}/result.json" ]; then
-          STATUS=$(jq -r '.status // .gateResult.pass // "ERROR"' "${{ inputs.output-dir }}/result.json")
-          TOTAL=$(jq -r '.findings | length // 0' "${{ inputs.output-dir }}/result.json")
-          CRITICAL=$(jq -r '[.findings[] | select(.severity == "CRITICAL")] | length // 0' "${{ inputs.output-dir }}/result.json")
-          HIGH=$(jq -r '[.findings[] | select(.severity == "HIGH")] | length // 0' "${{ inputs.output-dir }}/result.json")
-          MEDIUM=$(jq -r '[.findings[] | select(.severity == "MEDIUM")] | length // 0' "${{ inputs.output-dir }}/result.json")
-          LOW=$(jq -r '[.findings[] | select(.severity == "LOW")] | length // 0' "${{ inputs.output-dir }}/result.json")
-          HASH=$(jq -r '.metadata.contentHash // ""' "${{ inputs.output-dir }}/result.json" 2>/dev/null || echo "")
-          
-          # Extract SARIF from API response if present
-          if jq -e '.sarif' "${{ inputs.output-dir }}/result.json" > /dev/null 2>&1; then
-            jq '.sarif' "${{ inputs.output-dir }}/result.json" > "${{ inputs.output-dir }}/haiec-scan.sarif"
-            echo "✓ SARIF report extracted"
-          fi
-          
-          # Extract gate result
-          GATE_PASS=$(jq -r '.gateResult.pass // true' "${{ inputs.output-dir }}/result.json")
-          GATE_EXIT=$(jq -r '.gateResult.exitCode // 0' "${{ inputs.output-dir }}/result.json")
-          GATE_SUMMARY=$(jq -r '.gateResult.summary // ""' "${{ inputs.output-dir }}/result.json")
-        else
-          STATUS="ERROR"
-          TOTAL=0
-          CRITICAL=0
-          HIGH=0
-          MEDIUM=0
-          LOW=0
-          HASH=""
-          GATE_PASS="false"
-          GATE_EXIT=1
-          GATE_SUMMARY="Scan failed to complete"
-        fi
-        
-        # Set outputs
-        echo "status=$STATUS" >> $GITHUB_OUTPUT
-        echo "exit_code=$SCAN_EXIT" >> $GITHUB_OUTPUT
-        echo "findings_total=$TOTAL" >> $GITHUB_OUTPUT
-        echo "findings_critical=$CRITICAL" >> $GITHUB_OUTPUT
-        echo "findings_high=$HIGH" >> $GITHUB_OUTPUT
-        echo "findings_medium=$MEDIUM" >> $GITHUB_OUTPUT
-        echo "findings_low=$LOW" >> $GITHUB_OUTPUT
-        echo "sarif_file=${{ inputs.output-dir }}/haiec-scan.sarif" >> $GITHUB_OUTPUT
-        echo "bundle_file=${{ inputs.output-dir }}/evidence-bundle.json" >> $GITHUB_OUTPUT
-        echo "content_hash=$HASH" >> $GITHUB_OUTPUT
-        echo "gate_pass=$GATE_PASS" >> $GITHUB_OUTPUT
-        
-        # Generate detailed summary
-        echo "" >> $GITHUB_STEP_SUMMARY
-        echo "## 🛡️ HAIEC Security Scan Results" >> $GITHUB_STEP_SUMMARY
-        echo "" >> $GITHUB_STEP_SUMMARY
-        echo "**Status:** $STATUS" >> $GITHUB_STEP_SUMMARY
-        echo "**Policy Gate:** $([ "$GATE_PASS" = "true" ] && echo "✅ PASSED" || echo "❌ FAILED")" >> $GITHUB_STEP_SUMMARY
-        echo "" >> $GITHUB_STEP_SUMMARY
-        echo "### 📊 Findings Summary" >> $GITHUB_STEP_SUMMARY
-        echo "" >> $GITHUB_STEP_SUMMARY
-        echo "| Severity | Count |" >> $GITHUB_STEP_SUMMARY
-        echo "| --- | --- |" >> $GITHUB_STEP_SUMMARY
-        echo "| 🔴 Critical | $CRITICAL |" >> $GITHUB_STEP_SUMMARY
-        echo "| 🟠 High | $HIGH |" >> $GITHUB_STEP_SUMMARY
-        echo "| 🟡 Medium | $MEDIUM |" >> $GITHUB_STEP_SUMMARY
-        echo "| 🟢 Low | $LOW |" >> $GITHUB_STEP_SUMMARY
-        echo "| **Total** | **$TOTAL** |" >> $GITHUB_STEP_SUMMARY
-        echo "" >> $GITHUB_STEP_SUMMARY
-        
-        if [ -n "$GATE_SUMMARY" ] && [ "$GATE_SUMMARY" != "null" ]; then
-          echo "### 📋 Policy Gate Result" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "$GATE_SUMMARY" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-        fi
-        
-        echo "### 📦 Artifacts" >> $GITHUB_STEP_SUMMARY
-        echo "" >> $GITHUB_STEP_SUMMARY
-        echo "- 📄 Full scan results: \`result.json\`" >> $GITHUB_STEP_SUMMARY
-        if [ -f "${{ inputs.output-dir }}/haiec-scan.sarif" ]; then
-          echo "- 🔍 SARIF report: \`haiec-scan.sarif\`" >> $GITHUB_STEP_SUMMARY
-        fi
-        echo "" >> $GITHUB_STEP_SUMMARY
-        
-        # Log summary to console
-        echo "::notice::HAIEC Scan Complete: $TOTAL findings ($CRITICAL critical, $HIGH high, $MEDIUM medium, $LOW low)"
-        if [ "$GATE_PASS" != "true" ]; then
-          echo "::error::Policy gate FAILED: $GATE_SUMMARY"
-        fi
+        npx --yes @haiec/cli@0.1.0 scan local . \
+          --system "$HAIEC_AI_SYSTEM_ID" \
+          --submit \
+          $([ "${{ inputs.wait }}" = "true" ] && echo --wait) \
+          --output "${{ inputs.output-dir }}" \
+          --json > "${{ inputs.output-dir }}/haiec-result.json"
 
-    # ============================================
-    # SARIF UPLOAD
-    # ============================================
-    
-    - name: Upload SARIF to Code Scanning
-      if: inputs.upload-sarif == 'true' && github.event_name != 'pull_request'
+        jq -r '"scan_id=" + (.submitted.scan.scanId // "")' "${{ inputs.output-dir }}/haiec-result.json" >> "$GITHUB_OUTPUT"
+        jq -r '"run_id=" + (.submitted.run.runId // "")' "${{ inputs.output-dir }}/haiec-result.json" >> "$GITHUB_OUTPUT"
+        jq -r '"evaluation_id=" + (.submitted.run.evaluation.evaluationId // "")' "${{ inputs.output-dir }}/haiec-result.json" >> "$GITHUB_OUTPUT"
+        jq -r '"disposition=" + (.submitted.run.evaluation.disposition // "")' "${{ inputs.output-dir }}/haiec-result.json" >> "$GITHUB_OUTPUT"
+        jq -r '"report_url=" + (.submitted.run.links.report // "")' "${{ inputs.output-dir }}/haiec-result.json" >> "$GITHUB_OUTPUT"
+        jq -r '"passport_url=" + (.submitted.run.links.passport // "")' "${{ inputs.output-dir }}/haiec-result.json" >> "$GITHUB_OUTPUT"
+        jq -r '"findings_total=" + ((.statistics.findings_total // 0)|tostring)' "${{ inputs.output-dir }}/haiec-result.json" >> "$GITHUB_OUTPUT"
+        jq -r '"findings_critical=" + ((.statistics.findings_by_severity.critical // 0)|tostring)' "${{ inputs.output-dir }}/haiec-result.json" >> "$GITHUB_OUTPUT"
+        jq -r '"findings_high=" + ((.statistics.findings_by_severity.high // 0)|tostring)' "${{ inputs.output-dir }}/haiec-result.json" >> "$GITHUB_OUTPUT"
+
+    - name: Upload SARIF
+      if: inputs.upload-sarif == 'true'
       uses: github/codeql-action/upload-sarif@v3
       continue-on-error: true
       with:
         sarif_file: ${{ inputs.output-dir }}/haiec-scan.sarif
-        category: haiec-security
+        category: haiec-local-assurance
 
-    # ============================================
-    # ARTIFACT UPLOAD
-    # ============================================
-    
-    - name: Upload Scan Artifacts
-      uses: actions/upload-artifact@v4
-      with:
-        name: haiec-scan-${{ github.run_id }}
-        path: ${{ inputs.output-dir }}/
-        retention-days: 30
-
-    # ============================================
-    # POLICY ENFORCEMENT
-    # ============================================
-    
-    - name: Evaluate Policy
+    - name: Enforce local findings policy
       shell: bash
       run: |
-        STATUS="${{ steps.scan.outputs.status }}"
-        CRITICAL="${{ steps.scan.outputs.findings_critical }}"
-        HIGH="${{ steps.scan.outputs.findings_high }}"
-        TOTAL="${{ steps.scan.outputs.findings_total }}"
-        
-        SHOULD_FAIL=false
-        
-        # Check fail conditions
-        if [ "${{ inputs.fail-on-critical }}" = "true" ] && [ "$CRITICAL" != "0" ]; then
-          echo "::error::Critical findings detected: $CRITICAL"
-          SHOULD_FAIL=true
-        fi
-        
-        if [ "${{ inputs.fail-on-high }}" = "true" ] && [ "$HIGH" != "0" ]; then
-          echo "::error::High findings detected: $HIGH"
-          SHOULD_FAIL=true
-        fi
-        
-        if [ "${{ inputs.fail-on-findings }}" = "true" ] && [ "$TOTAL" != "0" ]; then
-          echo "::error::Findings detected: $TOTAL"
-          SHOULD_FAIL=true
-        fi
-        
-        if [ "$STATUS" = "FAIL" ]; then
-          echo "::error::Policy evaluation failed"
-          SHOULD_FAIL=true
-        fi
-        
-        if [ "$SHOULD_FAIL" = "true" ]; then
-          exit 1
-        fi
-        
-        echo "✓ Policy evaluation passed"
+        set -euo pipefail
+        total=$(jq -r '.statistics.findings_total // 0' "${{ inputs.output-dir }}/haiec-result.json")
+        critical=$(jq -r '.statistics.findings_by_severity.critical // 0' "${{ inputs.output-dir }}/haiec-result.json")
+        high=$(jq -r '.statistics.findings_by_severity.high // 0' "${{ inputs.output-dir }}/haiec-result.json")
+        if [ "${{ inputs.fail-on-findings }}" = "true" ] && [ "$total" -gt 0 ]; then exit 1; fi
+        if [ "${{ inputs.fail-on-critical }}" = "true" ] && [ "$critical" -gt 0 ]; then exit 1; fi
+        if [ "${{ inputs.fail-on-high }}" = "true" ] && [ "$high" -gt 0 ]; then exit 1; fi
